@@ -11,9 +11,11 @@ import argparse
 import jinja2
 import os
 import sys
+import tempfile
 
 from Crypto.PublicKey import RSA
 from Crypto.Util import number
+from distutils import spawn
 
 def genWords(bits, num):
     words = []
@@ -58,6 +60,9 @@ def genKey(name, filename):
     return key
 
 def main(args):
+    if not args.no_out and args.output == '':
+        print("Either provide an OUTPUT_DTB or use --no-out")
+        return 1
     if not os.path.exists(args.template):
         print("Cannot find template input: %s" % args.template)
         return 1
@@ -78,25 +83,39 @@ def main(args):
                 os.path.join(base, filename)))
 
     source = jinja2.Template(template_data).render(keys=keys,
-        algorithm=args.algorithm, node=args.required)
-    print(source)
+        algorithm=args.algorithm, node=args.required_node)
+    if args.no_out:
+        print(source)
+        return 0
 
-    return 0
+    dtc = spawn.find_executable('dtc')
+    if dtc == '':
+        print("Cannot find 'dtc' in your path, maybe try using --no-out")
+        return 1
+    with tempfile.NamedTemporaryFile() as tmp:
+        tmp.write(source)
+        tmp.flush()
+        spawn.spawn(
+            [dtc, "-I", "dts", "-O", "dtb", "-o", args.output, tmp.name])
+    print("Write certificate store DTB: %s" % args.output)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         description="Generate a FIT certificate store (a DTB).")
-    parser.add_argument("keys",
+    parser.add_argument("keys", metavar="DIRECTORY",
         help="Path to directory containing public keys")
-    parser.add_argument("--ext", default="pub",
+    parser.add_argument("output", nargs='?', metavar="OUTPUT_DTB", default='',
+        help="Output path of compiled certificate store (dtb)")
+
+    parser.add_argument("--ext", default="pub", metavar="pub",
         help="Search for public keys with this file extension")
-    parser.add_argument("--template", default="store.dts.in",
+    parser.add_argument("--template", default="store.dts.in", metavar="PATH",
         help="Certificate store template")
     parser.add_argument("--no-out", default=False, action="store_true",
         help="Print the resultant source instead of compiling")
-    parser.add_argument("--algorithm", default="sha256",
+    parser.add_argument("--algorithm", default="sha256", metavar="sha256",
         help="Override default hashing algorithm")
-    parser.add_argument("--required", default="conf",
+    parser.add_argument("--required-node", default="conf", metavar="conf",
         help="Set the required node (default=conf)")
     args = parser.parse_args()
     sys.exit(main(args))
