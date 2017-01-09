@@ -1,0 +1,19 @@
+/dts-v1/;
+
+/ {
+	keys {
+{% for store in stores %}
+		store@{{store.i}} {
+			description = "Subordinate key store";
+			data = /incbin/("{{store.tempdata}}");
+			hash@1 {
+				algo = "sha256";
+			};
+			signature@1 {
+				algo = "sha256,rsa4096";
+				key-name-hint = "pk";
+			};
+		};
+{% endfor %}
+	};
+};

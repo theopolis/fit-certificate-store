@@ -59,19 +59,39 @@ def genKey(name, filename):
     key["rsquared"] = " ".join(genWords(size, r_squared))
     return key
 
-def main(args):
-    if not args.no_out and args.output == '':
-        print("Either provide an OUTPUT_DTB or use --no-out")
-        return 1
-    if not os.path.exists(args.template):
-        print("Cannot find template input: %s" % args.template)
-        return 1
-    if not os.path.exists(args.keys):
-        print("Cannot find key directory: %s" % args.keys)
-        return 1
 
+def decompileSource(filename):
+    with tempfile.NamedTemporaryFile() as tmp:
+        spawn.spawn(
+            [dtc, "-I", "dtb", "-O", "dts", "-o", tmp.name, filename])
+        with open(tmp.name) as fh:
+            source = fh.read()
+    return source
+
+def compileSource(source, output, s=1):
+    with tempfile.NamedTemporaryFile() as tmp:
+        tmp.write(source)
+        tmp.flush()
+        spawn.spawn(
+            [dtc, "-I", "dts", "-O", "dtb", "-o", output, tmp.name])
+    print("Wrote certificate store DTB (%d keys): %s" % (s, output))
+
+
+def buildKeySource(td, keys, output=None):
+    source = jinja2.Template(td).render(keys=keys,
+        algorithm=args.algorithm, node=args.required_node,
+        extendable=args.allow_extending)
+    if output is None:
+        return source
+    compileSource(source, output, len(keys))
+    return source
+
+
+def main(args):
     with open(args.template, "rU") as fh:
         template_data = fh.read()
+    with open(args.subtemplate, "rU") as fh:
+        sub_template_data = fh.read()
 
     keys = []
     for base, _, filenames in os.walk(args.keys):
@@ -82,22 +102,24 @@ def main(args):
             keys.append(genKey(os.path.basename(key_name),
                 os.path.join(base, filename)))
 
-    source = jinja2.Template(template_data).render(keys=keys,
-        algorithm=args.algorithm, node=args.required_node)
-    if args.no_out:
-        print(source)
+    if args.subordinate:
+        with tempfile.NamedTemporaryFile() as tmp:
+            buildKeySource(template_data, keys, tmp.name)
+            stores = [{"i": 1, "tempdata": tmp.name}]
+            source = jinja2.Template(sub_template_data).render(stores=stores)
+            with tempfile.NamedTemporaryFile() as tmp2:
+                compileSource(source,
+                    tmp2.name if args.no_out else args.output, len(stores))
+                if args.no_out:
+                    source = decompileSource(tmp2.name)
+                    print(source)
         return 0
 
-    dtc = spawn.find_executable('dtc')
-    if dtc == '':
-        print("Cannot find 'dtc' in your path, maybe try using --no-out")
-        return 1
-    with tempfile.NamedTemporaryFile() as tmp:
-        tmp.write(source)
-        tmp.flush()
-        spawn.spawn(
-            [dtc, "-I", "dts", "-O", "dtb", "-o", args.output, tmp.name])
-    print("Write certificate store DTB: %s" % args.output)
+    source = buildKeySource(template_data,
+        keys, None if args.no_out else args.output)
+    if args.no_out:
+        print(source)
+    return 0
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
@@ -117,5 +139,30 @@ if __name__ == '__main__':
         help="Override default hashing algorithm")
     parser.add_argument("--required-node", default="conf", metavar="conf",
         help="Set the required node (default=conf)")
+    parser.add_argument("--allow-extending", default=False, action="store_true",
+        help="Generate a cert store with keys=true")
+    parser.add_argument("--subordinate", default=False, action="store_true",
+        help="Generate a subordinate certificate store")
+    parser.add_argument("--subtemplate", default="sub.dts.in", metavar="PATH",
+        help="Subordinate certificate store template")
     args = parser.parse_args()
+
+    if not args.no_out and args.output == '':
+        print("Either provide an OUTPUT_DTB or use --no-out")
+        sys.exit(1)
+    if not os.path.exists(args.template):
+        print("Cannot find template input: %s" % args.template)
+        sys.exit(1)
+    if not os.path.exists(args.subtemplate):
+        print("Cannot find subordinate template input: %s" % args.subtemplate)
+        sys.exit(1)
+    if not os.path.exists(args.keys):
+        print("Cannot find key directory: %s" % args.keys)
+        sys.exit(1)
+
+    dtc = spawn.find_executable('dtc')
+    if dtc == '':
+        print("Cannot find 'dtc' in your path")
+        sys.exit(1)
+
     sys.exit(main(args))
