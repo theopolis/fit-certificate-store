@@ -20,6 +20,11 @@ def write_content(offset, data):
 def write_firmware(filename):
     with open(filename) as fh:
         signed_content = fh.read()
+
+    if args.subordinate is not None:
+        updated_fit = inject_subordinate(signed_content, args.subordinate)
+        signed_content = updated_fit + signed_content[len(updated_fit):]
+
     write_content(args.offset, signed_content)
     padding = args.max_size - len(signed_content)
     write_content(args.offset + len(signed_content), '\0' * padding)
@@ -29,6 +34,28 @@ def write_os(filename):
     with open(filename) as fh:
         signed_content = fh.read()
         write_content(args.os, signed_content)
+
+
+def inject_subordinate(signed_content, path):
+    with open(path) as fh:
+        sub_data = fh.read()
+        # Read the subordinate key store as a FDT.
+        fit_io = StringIO.StringIO(sub_data)
+        dtb = pyfdt.FdtBlobParse(fit_io)
+        sub_fdt = dtb.to_fdt()
+
+    fit_io = StringIO.StringIO(signed_content)
+    dtb = pyfdt.FdtBlobParse(fit_io)
+    fdt = dtb.to_fdt()
+
+    pubkey = sub_fdt.resolve_path('/images/fdt@1')
+    if pubkey is None:
+        print("Subordinate key store does not contain /images/fdt@1")
+        sys.exit(1)
+
+    images = fdt.resolve_path('/images')
+    images.append(pubkey)
+    return fdt.to_dtb()
 
 
 def sign_firmware(dts):
@@ -113,7 +140,11 @@ def main():
     fdt = dtb.to_fdt()
 
     # Timestamp's existance will cause FDT_ERR_NOSPACE errors
-    fdt.get_rootnode().remove('timestamp')
+    try:
+        fdt.get_rootnode().remove('timestamp')
+    except ValueError:
+        # Timestamp may not be present
+        pass
 
     # The FIT should contain /images/firmware@1
     firmware = fdt.resolve_path('/images/firmware@1')
