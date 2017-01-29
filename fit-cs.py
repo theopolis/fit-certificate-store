@@ -151,7 +151,7 @@ if __name__ == '__main__':
     if not args.no_out and args.output == '':
         print("Either provide an OUTPUT_DTB or use --no-out")
         sys.exit(1)
-    if not args.subordinate and not os.path.exists(args.template):
+    if not os.path.exists(args.template):
         print("Cannot find template input: %s" % args.template)
         sys.exit(1)
     if args.subordinate and not os.path.exists(args.subtemplate):

@@ -138,31 +138,35 @@ def main():
     set_algorithms(fdt, '/images/firmware@1')
     set_hint(fdt, '/images/firmware@1')
 
-    os.remove(args.output)
+    try:
+        os.remove(args.output)
+    except OSError:
+        pass
     write_content(0x0, data[0:args.offset])
     ret = sign_firmware(fdt.to_dts())
     if ret == 1:
         return 1
 
-    os_fit = data[args.os:]
-    fit_io = StringIO.StringIO(os_fit)
-    dtb = pyfdt.FdtBlobParse(fit_io)
-    fdt = dtb.to_fdt()
+    if not args.skip_os:
+        os_fit = data[args.os:]
+        fit_io = StringIO.StringIO(os_fit)
+        dtb = pyfdt.FdtBlobParse(fit_io)
+        fdt = dtb.to_fdt()
 
-    # Again, this node will cause FDT_ERR_NOSPACE errors
-    fdt.get_rootnode().remove('timestamp')
+        # Again, this node will cause FDT_ERR_NOSPACE errors
+        fdt.get_rootnode().remove('timestamp')
 
-    config = fdt.resolve_path('/configurations/conf@1')
-    if config is None:
-        print("OS FIT does not contain a configuration")
-        return 1
+        config = fdt.resolve_path('/configurations/conf@1')
+        if config is None:
+            print("OS FIT does not contain a configuration")
+            return 1
 
-    set_algorithms(fdt, '/configurations/conf@1')
-    set_hint(fdt, '/configurations/conf@1')
+        set_algorithms(fdt, '/configurations/conf@1')
+        set_hint(fdt, '/configurations/conf@1')
 
-    ret = sign_os(fdt.to_dts())
-    if ret == 1:
-        return 1
+        ret = sign_os(fdt.to_dts())
+        if ret == 1:
+            return 1
 
     print("Wrote signed firmware: %s" % (args.output))
     return 0
@@ -180,6 +184,8 @@ if __name__ == '__main__':
         help="Max size of FIT and data content")
     parser.add_argument('--os', default=0xe0000, type=int,
         help="Location within filetime to find OS (kernel,rootfs) FIT DTB")
+    parser.add_argument("--skip-os", default=True, action="store_true",
+        help="Do not look for an OS to sign")
     parser.add_argument('--subordinate', default=None, metavar="PATH",
         help="Optional path to subordinate certificate store (to add)")
     parser.add_argument('--keydir', required=True, metavar="DIR",
