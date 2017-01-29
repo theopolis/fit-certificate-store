@@ -90,8 +90,6 @@ def buildKeySource(td, keys, output=None):
 def main(args):
     with open(args.template, "rU") as fh:
         template_data = fh.read()
-    with open(args.subtemplate, "rU") as fh:
-        sub_template_data = fh.read()
 
     keys = []
     for base, _, filenames in os.walk(args.keys):
@@ -103,6 +101,9 @@ def main(args):
                 os.path.join(base, filename)))
 
     if args.subordinate:
+        with open(args.subtemplate, "rU") as fh:
+            sub_template_data = fh.read()
+
         with tempfile.NamedTemporaryFile() as tmp:
             buildKeySource(template_data, keys, tmp.name)
             stores = [{"i": 1, "tempdata": tmp.name}]
@@ -150,10 +151,10 @@ if __name__ == '__main__':
     if not args.no_out and args.output == '':
         print("Either provide an OUTPUT_DTB or use --no-out")
         sys.exit(1)
-    if not os.path.exists(args.template):
+    if not args.subordinate and not os.path.exists(args.template):
         print("Cannot find template input: %s" % args.template)
         sys.exit(1)
-    if not os.path.exists(args.subtemplate):
+    if args.subordinate and not os.path.exists(args.subtemplate):
         print("Cannot find subordinate template input: %s" % args.subtemplate)
         sys.exit(1)
     if not os.path.exists(args.keys):
