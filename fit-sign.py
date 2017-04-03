@@ -204,17 +204,18 @@ def main():
     rom_fit_offset = 0
     for i in range(args.rom_size / 4):
         if data[i * 4:(i * 4) + 4] == "\xd0\x0d\xfe\xed":
-            rom_fit = rom[i * 4:]
+            rom_fit = rom[i * 4:(i * 4) + args.rom_fit_size]
             rom_fit_offset = i * 4
             break
     if rom_fit is None:
         print("Cannot find FIT region within ROM")
         sys.exit(1)
 
-    rom_content = data[0:rom_fit_offset]
+    rom_content_pre = data[0:rom_fit_offset]
     rom_fit = inject_kek(rom_fit, args.kek)
-    rom_padding = '\x00' * (args.rom_size - len(rom_fit) - len(rom_content))
-    data = rom_content + rom_fit + rom_padding + data[args.rom_size:]
+    rom_fit += '\x00' * (3200 - len(rom_fit))
+    rom_content_post = data[rom_fit_offset + 3200:args.rom_size]
+    data = rom_content_pre + rom_fit + rom_content_post + data[args.rom_size:]
 
     if args.signed_subordinate is not None:
         updated_fit = inject_subordinate(uboot_fit, args.signed_subordinate)
@@ -295,6 +296,8 @@ if __name__ == '__main__':
         help="Location to ROM kek certificate store DTS", required=True)
     parser.add_argument('--rom-size', default=84 * 1024,
         help="Size of ROM region")
+    parser.add_argument('--rom-fit-size', default=3200,
+        help="Size of the ROM FIT region")
     parser.add_argument('--offset', default=0x080000, type=int,
         help="Location within filename to find firmware FIT DTB")
     parser.add_argument('--size', default=0x4000, type=int,
