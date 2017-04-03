@@ -5,6 +5,7 @@ import tempfile
 import argparse
 import StringIO
 import sys
+import time
 
 from distutils import spawn
 
@@ -21,10 +22,6 @@ def write_firmware(filename):
     with open(filename) as fh:
         signed_content = fh.read()
 
-    if args.subordinate is not None:
-        updated_fit = inject_subordinate(signed_content, args.subordinate)
-        signed_content = updated_fit + signed_content[len(updated_fit):]
-
     write_content(args.offset, signed_content)
     padding = args.max_size - len(signed_content)
     write_content(args.offset + len(signed_content), '\0' * padding)
@@ -36,34 +33,62 @@ def write_os(filename):
         write_content(args.os, signed_content)
 
 
-def inject_subordinate(signed_content, path):
-    with open(path) as fh:
+def inject_subordinate(unsigned_content, path):
+    with open(path, 'rb') as fh:
         sub_data = fh.read()
         # Read the subordinate key store as a FDT.
-        fit_io = StringIO.StringIO(sub_data)
-        dtb = pyfdt.FdtBlobParse(fit_io)
-        sub_fdt = dtb.to_fdt()
+        sub_fdt = get_fdt(sub_data)
 
-    fit_io = StringIO.StringIO(signed_content)
-    dtb = pyfdt.FdtBlobParse(fit_io)
-    fdt = dtb.to_fdt()
+    fdt = get_fdt(unsigned_content)
 
     pubkey = sub_fdt.resolve_path('/images/fdt@1')
     if pubkey is None:
         print("Subordinate key store does not contain /images/fdt@1")
         sys.exit(1)
 
-    images = fdt.resolve_path('/images')
-    images.append(pubkey)
+    keys = fdt.resolve_path('/keys')
+    if keys is None:
+        print("The firmware does not contain a /keys subnode")
+        # This does not have a keys subnode.
+        keys = pyfdt.FdtNode('keys')
+        fdt.get_rootnode().add_subnode(keys)
+
+    existing_keys = fdt.resolve_path('/keys/fdt@1')
+    if existing_keys is not None:
+        print("Note: Removing existing signing KEK key store")
+        fdt.resolve_path('/keys').remove('fdt@1')
+
+    keys.append(pubkey)
+    return fdt.to_dtb()
+
+
+def inject_kek(rom_fit, path):
+    # Open the path to the ROM/KEK public keys
+    with open(path) as fh:
+        kek_data = fh.read()
+        kek_fdt = get_fdt(kek_data)
+
+    kek_keys = kek_fdt.resolve_path('/signature')
+    if kek_keys is None:
+        print("ROM KEK key store does not contain /signature")
+        sys.exit(1)
+
+    fdt = get_fdt(rom_fit)
+    existing_kek_keys = fdt.resolve_path('/signature')
+    if existing_kek_keys is not None:
+        print("Note: Removing existing ROM KEK key store")
+        fdt.resolve_path('/').remove('signature')
+
+    fdt.get_rootnode().add_subnode(kek_keys)
     return fdt.to_dtb()
 
 
 def sign_firmware(dts):
     # Perform signing.
-    with tempfile.NamedTemporaryFile() as tmp:
+    with tempfile.NamedTemporaryFile(delete=False) as tmp:
         tmp.write(dts)
         tmp.flush()
-        with tempfile.NamedTemporaryFile() as tmp2:
+        with tempfile.NamedTemporaryFile(delete=False) as tmp2:
             print(" ".join([args.mkimage, "-f", tmp.name, "-E",
                 "-k", args.keydir,
                 "-p", "%08x" % args.size, "-r", tmp2.name]))
@@ -83,7 +108,6 @@ def sign_firmware(dts):
 
 
 def sign_os(dts):
-    #write_content(args.os, data[args.os:])
     with tempfile.NamedTemporaryFile(delete=False) as tmp:
         tmp.write(dts)
         tmp.flush()
@@ -105,8 +129,6 @@ def set_algorithms(fdt, path):
     # Override the requested hashing and signing algorithms.
     algo = fdt.resolve_path("%s/signature@1/algo" % (path))
     algo.strings = ['sha256,rsa4096']
-    algo = fdt.resolve_path("%s/hash@1/algo" % (path))
-    algo.strings = ['sha256']
     return 0
 
 
@@ -128,16 +150,77 @@ def set_hint(fdt, path):
     return 0
 
 
+def set_sign(fdt, path, images):
+    new_prop = pyfdt.FdtPropertyStrings('sign-images', images)
+    config = fdt.resolve_path("%s/signature@1" % path)
+    try:
+        config.remove('sign-images')
+    except ValueError:
+        pass
+
+    config.subdata.insert(0, new_prop)
+
+
+def get_fdt(content):
+    # Represent the FIT as an IO resource.
+    fit_io = StringIO.StringIO(content)
+    dtb = pyfdt.FdtBlobParse(fit_io)
+    fdt = dtb.to_fdt()
+    return fdt
+
+
+def write_test_fdt(data, fdt):
+    write_content(0x0, data[0:args.offset])
+    new_content = fdt.to_dtb()
+    write_content(args.offset, new_content)
+    padding = args.size - len(new_content)
+    write_content(args.offset + len(new_content), '\0' * padding)
+
+    offset = args.size + args.offset
+    write_content(offset, data[offset:])
+
+
 def main():
-    with open(args.filename) as fh:
+    with open(args.filename, 'rb') as fh:
         data = fh.read()
         # Extract the FIT describing U-Boot
         uboot_fit = data[args.offset:args.offset + args.size]
+        rom = data[0:args.rom_size]
 
-    # Represent the FIT as an IO resource.
-    fit_io = StringIO.StringIO(uboot_fit)
-    dtb = pyfdt.FdtBlobParse(fit_io)
-    fdt = dtb.to_fdt()
+    if args.test_remove_timestamp:
+        fdt = get_fdt(uboot_fit)
+        fdt.get_rootnode().remove('timestamp')
+        write_test_fdt(data, fdt)
+        return 0
+
+    if args.test_change_timestamp:
+        fdt = get_fdt(uboot_fit)
+        timestamp = fdt.resolve_path('/timestamp')
+        timestamp.words = [time.time()]
+        write_test_fdt(data, fdt)
+        return 0
+
+    rom_fit = None
+    rom_fit_offset = 0
+    for i in range(args.rom_size / 4):
+        if data[i * 4:(i * 4) + 4] == "\xd0\x0d\xfe\xed":
+            rom_fit = rom[i * 4:]
+            rom_fit_offset = i * 4
+            break
+    if rom_fit is None:
+        print("Cannot find FIT region within ROM")
+        sys.exit(1)
+
+    rom_content = data[0:rom_fit_offset]
+    rom_fit = inject_kek(rom_fit, args.kek)
+    rom_padding = '\x00' * (args.rom_size - len(rom_fit) - len(rom_content))
+    data = rom_content + rom_fit + rom_padding + data[args.rom_size:]
+
+    if args.signed_subordinate is not None:
+        updated_fit = inject_subordinate(uboot_fit, args.signed_subordinate)
+        uboot_fit = updated_fit
+
+    fdt = get_fdt(uboot_fit)
 
     # Timestamp's existance will cause FDT_ERR_NOSPACE errors
     try:
@@ -149,7 +232,7 @@ def main():
     # The FIT should contain /images/firmware@1
     firmware = fdt.resolve_path('/images/firmware@1')
     if firmware is None:
-        print("Firmware does not contain a U-Boot FIT with /images/firmware@1")
+        print("Firmware does not contain a FIT with /images/firmware@1")
         sys.exit(1)
 
     # The content of U-Boot is stored external to the FIT.
@@ -166,8 +249,9 @@ def main():
     new_prop = pyfdt.FdtPropertyWords.init_raw('data', uboot)
     firmware.subdata.insert(0, new_prop)
 
-    set_algorithms(fdt, '/images/firmware@1')
-    set_hint(fdt, '/images/firmware@1')
+    set_algorithms(fdt, '/configurations/conf@1')
+    set_hint(fdt, '/configurations/conf@1')
+    set_sign(fdt, '/configurations/conf@1', ['firmware'])
 
     try:
         os.remove(args.output)
@@ -178,11 +262,9 @@ def main():
     if ret == 1:
         return 1
 
-    if not args.skip_os:
+    if args.sign_os:
         os_fit = data[args.os:]
-        fit_io = StringIO.StringIO(os_fit)
-        dtb = pyfdt.FdtBlobParse(fit_io)
-        fdt = dtb.to_fdt()
+        fdt = get_fdt(os_fit)
 
         # Again, this node will cause FDT_ERR_NOSPACE errors
         fdt.get_rootnode().remove('timestamp')
@@ -198,6 +280,8 @@ def main():
         ret = sign_os(fdt.to_dts())
         if ret == 1:
             return 1
+    else:
+        write_content(args.os, data[args.os:])
 
     print("Wrote signed firmware: %s" % (args.output))
     return 0
@@ -207,6 +291,10 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Example sign')
     parser.add_argument('filename', help="Input firmware")
     parser.add_argument('output', help="Output firmware")
+    parser.add_argument('--kek', default=None, metavar="PATH",
+        help="Location to ROM kek certificate store DTS", required=True)
+    parser.add_argument('--rom-size', default=84 * 1024,
+        help="Size of ROM region")
     parser.add_argument('--offset', default=0x080000, type=int,
         help="Location within filename to find firmware FIT DTB")
     parser.add_argument('--size', default=0x4000, type=int,
@@ -215,14 +303,20 @@ if __name__ == '__main__':
         help="Max size of FIT and data content")
     parser.add_argument('--os', default=0xe0000, type=int,
         help="Location within filetime to find OS (kernel,rootfs) FIT DTB")
-    parser.add_argument("--skip-os", default=True, action="store_true",
-        help="Do not look for an OS to sign")
-    parser.add_argument('--subordinate', default=None, metavar="PATH",
-        help="Optional path to subordinate certificate store (to add)")
+    parser.add_argument("--sign-os", default=False, action="store_true",
+        help="Sign kernel and rootfs")
+    parser.add_argument('--signed-subordinate', default=None, metavar="PATH",
+        help="Optional path to signed subordinate certificate store (to add)")
     parser.add_argument('--keydir', required=True, metavar="DIR",
         help="Required path to directory containing '.key' private key")
     parser.add_argument('--mkimage', required=True, metavar="PATH",
         help="Required path to mkimage")
+    parser.add_argument('--test-remove-timestamp', default=False,
+        action='store_true',
+        help='For testing, remove the timestamp node')
+    parser.add_argument('--test-change-timestamp', default=False,
+        action='store_true',
+        help='For testing, alter the timestamp node')
     args = parser.parse_args()
 
     if not os.path.isdir(args.keydir):

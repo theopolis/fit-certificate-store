@@ -138,8 +138,8 @@ if __name__ == '__main__':
         help="Print the resultant source instead of compiling")
     parser.add_argument("--algorithm", default="sha256", metavar="sha256",
         help="Override default hashing algorithm")
-    parser.add_argument("--required-node", default="conf", metavar="conf",
-        help="Set the required node (default=conf)")
+    parser.add_argument("--required-node", default="auto", metavar="conf",
+        help="Set the required node (default=auto)")
     parser.add_argument("--allow-extending", default=False, action="store_true",
         help="Generate a cert store with keys=true")
     parser.add_argument("--subordinate", default=False, action="store_true",
@@ -147,6 +147,12 @@ if __name__ == '__main__':
     parser.add_argument("--subtemplate", default="sub.dts.in", metavar="PATH",
         help="Subordinate certificate store template")
     args = parser.parse_args()
+
+    if args.required_node == 'auto':
+        if args.subordinate:
+            args.required_node = 'conf'
+        else:
+            args.required_node = 'image'
 
     if not args.no_out and args.output == '':
         print("Either provide an OUTPUT_DTB or use --no-out")
